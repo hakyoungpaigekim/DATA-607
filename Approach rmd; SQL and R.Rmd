@@ -1,0 +1,238 @@
+---
+title: "sql and r. Movie rating"
+author: "Ha Kyoung Kim"
+date: "2026-02-05"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+## Project goal
+
+I will be going to build a small movie-ratings dataset that resembles the user item data commonly used in recommender systems. I have asked five people to rate six popular korean movies on a 1 to 5 scale, stored those ratings in a SQL database, and then pulled the data into R so I can inspect it and summarize it. The goal is to demonstrate a clean end-to-end workflow from data collection to analysis. 
+
+## How I plan to tackle it
+
+For this assignment, I used six Korean films (Exhuma, Concrete Utopia, The Roundup No Way Out, Decision to Leave, Parasite, Train to Busan) and surveyed five students I know. If they haven’t seen a movie, they’ll leave it blank. For privacy and simplicity, I’ll label participants from p1 to p5. 
+
+To keep the ratings interpretable, I’ll define the scale clearly (for example: 1 = strongly disliked, 3 = neutral, 5 = strongly liked). 
+
+After collecting responses, I’ll standardize them into a consistent structure so it can be inserted into SQL cleanly.
+
+Next, I’ll store the data in a relational database using a small normalized schema with three tables:
+1. "users" for participants
+2. "movies" for the six titles
+3. "ratings" as a junction table linking users and movies, storing each rating
+
+This table structure fits the nature of the problem (each user can rate many movies, and each movie can be rated by many users). And it also allows missing ratings to be represented directly as NULL values in SQL.
+
+
+## Data challenges I expect (and how I’ll handle them)
+
+The main issue will be missing ratings because not everyone will have seen every movie. I will treat missing ratings as “not seen / not rated,” not as a neutral score. For movie averages and similar summaries, I’ll compute results using only observed ratings and I’ll report the number of ratings behind each statistic so results aren’t misleading.
+
+Also, the dataset is very small and therefore produce biased results. With only five participants, this dataset won’t represent the general public. I beleive that’s fine for this assignment. I’ll frame the analysis as a demonstration of data collection, SQL storage, and careful handling of missing data—not as a definitive ranking of movies.
+
+In addirion to the bias, some participants could rate harshly while others rate generously. 
+
+
+
+## Body
+
+In this section, I’m going to first create a small SQL database from scratch then insert my movies, users, and ratings. Afterwards, I'll pull the results into R for basic summaries. 
+I’m using SQLite. 
+
+
+```{r setup, message=FALSE, warning=FALSE}
+library(DBI)
+library(RSQLite)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+```
+
+### Creting SQL database 
+My goal is to make this reproducible. I’m creating the database directly inside this report. The schema is normalized with three tables (users, movies, ratings). 
+
+```{r schema}
+con <- dbConnect(RSQLite::SQLite(), dbname=":memory:")
+dbExecute(con, "PRAGMA foreign_keys = ON;")
+
+dbExecute(con, "DROP TABLE IF EXISTS ratings;")
+dbExecute(con, "DROP TABLE IF EXISTS users;")
+dbExecute(con, "DROP TABLE IF EXISTS movies;")
+
+dbExecute(con, "
+CREATE TABLE users (
+  user_id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE
+);
+")
+
+dbExecute(con, "
+CREATE TABLE movies (
+  movie_id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL UNIQUE,
+  release_year INTEGER
+);
+")
+
+dbExecute(con, "
+CREATE TABLE ratings (
+  user_id INTEGER NOT NULL,
+  movie_id INTEGER NOT NULL,
+  rating INTEGER NULL,
+  PRIMARY KEY (user_id, movie_id),
+  FOREIGN KEY (user_id) REFERENCES users(user_id),
+  FOREIGN KEY (movie_id) REFERENCES movies(movie_id),
+  CHECK (rating IS NULL OR (rating BETWEEN 1 AND 5))
+);
+")
+```
+
+### insert users + movies + full grid
+```{r seed_base}
+dbExecute(con, "
+INSERT INTO users (name) VALUES
+('P1'), ('P2'), ('P3'), ('P4'), ('P5');
+")
+
+dbExecute(con, "
+INSERT INTO movies (title, release_year) VALUES
+('Exhuma', NULL),
+('Concrete Utopia', NULL),
+('The Roundup: No Way Out', NULL),
+('Decision to Leave', NULL),
+('Parasite', NULL),
+('Train to Busan', NULL);
+")
+
+dbExecute(con, "
+INSERT INTO ratings (user_id, movie_id, rating)
+SELECT u.user_id, m.movie_id, NULL
+FROM users u CROSS JOIN movies m;
+")
+```
+
+
+
+```{r seed_updates}
+ratings_input <- tibble::tribble(
+  ~user, ~movie, ~rating,
+
+  "P1", "Exhuma", 5,
+  "P2", "Exhuma", 4,
+  "P3", "Exhuma", 4,
+  "P4", "Exhuma", 3,
+  "P5", "Exhuma", 4,
+
+  "P1", "Concrete Utopia", 4,
+  "P2", "Concrete Utopia", 5,
+  "P3", "Concrete Utopia", 3,
+
+  "P1", "The Roundup: No Way Out", 2,
+  "P2", "The Roundup: No Way Out", 3,
+
+  "P1", "Decision to Leave", 5,
+
+  "P1", "Parasite", 5,
+  "P2", "Parasite", 5,
+  "P3", "Parasite", 5,
+  "P4", "Parasite", 5,
+  "P5", "Parasite", 5,
+
+  "P1", "Train to Busan", 5,
+  "P2", "Train to Busan", 4,
+  "P3", "Train to Busan", 4,
+  "P4", "Train to Busan", 5,
+  "P5", "Train to Busan", 5
+)
+
+for (i in seq_len(nrow(ratings_input))) {
+  dbExecute(con, sprintf("
+    UPDATE ratings
+    SET rating = %d
+    WHERE user_id = (SELECT user_id FROM users WHERE name = '%s')
+      AND movie_id = (SELECT movie_id FROM movies WHERE title = '%s');
+  ",
+  ratings_input$rating[i], ratings_input$user[i], ratings_input$movie[i]
+  ))
+}
+
+```
+
+
+```{r load}
+ratings_df <- dbGetQuery(con, "
+SELECT u.name AS user, m.title AS movie, m.release_year, r.rating
+FROM ratings r
+JOIN users u  ON r.user_id = u.user_id
+JOIN movies m ON r.movie_id = m.movie_id
+ORDER BY u.name, m.title;
+")
+
+head(ratings_df, 12)
+
+```
+
+
+
+```{r missing}
+ratings_df %>%
+  summarise(
+    total = n(),
+    observed = sum(!is.na(rating)),
+    missing = sum(is.na(rating)),
+    pct_missing = round(mean(is.na(rating)) * 100, 1)
+  )
+```
+
+```{r summaries}
+movie_summary <- ratings_df %>%
+  group_by(movie) %>%
+  summarise(
+    n_observed = sum(!is.na(rating)),
+    mean_rating = ifelse(n_observed == 0, NA, round(mean(rating, na.rm=TRUE), 2))
+  ) %>%
+  arrange(desc(mean_rating))
+
+movie_summary
+
+ratings_df %>%
+  group_by(user) %>%
+  summarise(
+    n_rated = sum(!is.na(rating)),
+    n_missing = sum(is.na(rating))
+  ) %>%
+  arrange(desc(n_rated))
+
+```
+
+
+```{r matrix}
+ratings_df %>%
+  select(user, movie, rating) %>%
+  pivot_wider(names_from = movie, values_from = rating)
+
+```
+
+
+```{r plot}
+movie_plot_df <- movie_summary %>% filter(!is.na(mean_rating))
+
+ggplot(movie_plot_df, aes(x = reorder(movie, mean_rating), y = mean_rating)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = NULL, y = "Mean rating (for those who have seen only)")
+
+```
+```{r disconnect}
+dbDisconnect(con)
+```
+
+## Conclusions
+
+I have created a small user–item ratings dataset using six Korean movies rated by five students, stored it in a normalized SQL database, and loaded it into R for analysis. Missing ratings were treated as not seen / not rated rather than a neutral score, and I summarized both the amount of missingness and the observed ratings. Based on the observed ratings, I computed average ratings per movie and checked how many movies each participant rated to understand coverage. 
+If I ever get to extend my work here, I would survey more participants to reduce bias and increase coverage, and I may also consider standardizing ratings within each user to account for generous vs harsh raters.
+
