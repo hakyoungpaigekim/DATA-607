@@ -1,0 +1,118 @@
+---
+title: "Project 1"
+author: "Ha Kyoung Kim"
+date: "2026-02-23"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages, include=FALSE}
+stopifnot(getRversion() >= "4.5.0")
+
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+pkgs <- c("dplyr", "stringr", "readr", "tidyr")
+
+to_install <- setdiff(pkgs, rownames(installed.packages()))
+if (length(to_install) > 0) install.packages(to_install, dependencies = TRUE)
+
+DO_UPDATE <- FALSE
+if (DO_UPDATE) update.packages(ask = FALSE, checkBuilt = TRUE)
+
+invisible(lapply(pkgs, library, character.only = TRUE))
+```
+
+```{r read file; tournamentinfo.txt}
+
+input_file <- "C:/Users/hkim1/OneDrive/Desktop/tournamentinfo.txt"
+stopifnot(file.exists(input_file))
+
+lines <- readLines(input_file, warn = FALSE, encoding = "UTF-8")
+lines <- str_replace_all(lines, "\r", "")
+lines <- lines[nzchar(str_trim(lines))]
+```
+
+```{r}
+
+player_idx <- which(str_detect(lines, "^\\s*\\d+\\s*\\|"))
+player_idx <- player_idx[player_idx < length(lines)]
+
+header_lines <- lines[player_idx]
+detail_lines <- lines[player_idx + 1]
+
+header_mat <- str_split(header_lines, "\\|", simplify = TRUE)
+header_df <- as.data.frame(header_mat, stringsAsFactors = FALSE)
+
+# drop trailing empty col caused by ending '|'
+while (ncol(header_df) > 0 && all(str_trim(header_df[[ncol(header_df)]]) == "")) {
+  header_df <- header_df[, -ncol(header_df), drop = FALSE]
+}
+
+stopifnot(ncol(header_df) >= 4)
+
+round_count <- ncol(header_df) - 3
+round_names <- paste0("r", seq_len(round_count))
+colnames(header_df) <- c("pair_raw", "name_raw", "total_raw", round_names)
+
+players <- header_df %>%
+  transmute(
+    pair_num  = as.integer(str_trim(pair_raw)),
+    name      = str_squish(name_raw) %>% str_to_lower() %>% str_to_title(),
+    total_pts = as.numeric(str_trim(total_raw)),
+    across(all_of(round_names), ~ str_squish(.x))
+  )
+
+detail_mat <- str_split(detail_lines, "\\|", simplify = TRUE)
+detail_df <- as.data.frame(detail_mat, stringsAsFactors = FALSE)
+
+state <- str_squish(detail_df[[1]])
+pre_rating <- as.integer(str_match(detail_df[[2]], "R:\\s*(\\d+)")[, 2])
+
+players <- players %>%
+  mutate(state = state, pre_rating = pre_rating)
+
+stopifnot(!any(is.na(players$pair_num)))
+stopifnot(!any(is.na(players$pre_rating)))
+```
+
+```{r}
+opponents_long <- players %>%
+  select(pair_num, all_of(round_names)) %>%
+  pivot_longer(cols = all_of(round_names), names_to = "round", values_to = "result") %>%
+  mutate(opp_pair = suppressWarnings(as.integer(str_extract(result, "\\d+")))) %>%
+  filter(!is.na(opp_pair)) %>%
+  select(pair_num, opp_pair)
+
+opp_avg <- opponents_long %>%
+  left_join(
+    players %>%
+      select(pair_num, pre_rating) %>%
+      rename(opp_pair = pair_num, opp_pre_rating = pre_rating),
+    by = "opp_pair"
+  ) %>%
+  group_by(pair_num) %>%
+  summarise(avg_opp_pre_rating = mean(opp_pre_rating, na.rm = TRUE), .groups = "drop")
+```
+
+```{r}
+final_df <- players %>%
+  left_join(opp_avg, by = "pair_num") %>%
+  transmute(
+    player_name       = name,
+    player_state      = state,
+    total_points      = total_pts,
+    player_pre_rating = pre_rating,
+    avg_opp_pre_rating = round(avg_opp_pre_rating)
+  )
+
+out_file <- "project1_chess_summary.csv"
+write_csv(final_df, out_file)
+
+final_df %>% slice(1:10)
+```
+
